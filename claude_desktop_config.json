@@ -1,0 +1,16 @@
+{
+    "mcpServers": {
+      "weather": {
+        "command": "python3",
+        "args": [
+          "/Users/patrickmoorhead/Code/amd/weather.py"
+        ]
+      },
+      "web-search": {
+        "command": "python3",
+        "args": [
+          "/Users/patrickmoorhead/Code/amd/web_search.py"
+        ]
+      }
+    }
+  }
