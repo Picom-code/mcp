@@ -1,126 +1,179 @@
-"""GitHub repository analysis tools."""
-
+from typing import Any, Dict, List
+import requests
+import base64
+import json
 from mcp.server.fastmcp import FastMCP
 
-import os
-import subprocess
-from typing import List
-import tempfile
-import shutil
-from pathlib import Path
-import hashlib
-import git
+# Initialize FastMCP server
+mcp = FastMCP("github_api")
 
-mcp = FastMCP(
-    "GitHub Tools",
-    dependencies=[
-        "gitpython",
-    ]
-)
+# Constants
+GITHUB_API_BASE = "https://api.github.com"
+USER_AGENT = "github-mcp-tool/1.0"
+# Add GitHub authentication token
+GITHUB_TOKEN = ""
 
-def clone_repo(repo_url: str) -> str:
-    """Clone a repository and return the path. If repository is already cloned in temp directory, reuse it."""
-    # Create a deterministic directory name based on repo URL
-    repo_hash = hashlib.sha256(repo_url.encode()).hexdigest()[:12]
-    temp_dir = os.path.join(tempfile.gettempdir(), f"github_tools_{repo_hash}")
+def get_github_contents(repo_owner: str, repo_name: str, path: str = "", ref: str = "main") -> dict:
+    """Get contents of a file or directory from GitHub API."""
+    url = f"{GITHUB_API_BASE}/repos/{repo_owner}/{repo_name}/contents/{path}"
+    params = {"ref": ref}
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"token {GITHUB_TOKEN}"
+    }
     
-    # If directory exists and is a valid git repo, return it
-    if os.path.exists(temp_dir):
-        try:
-            repo = git.Repo(temp_dir)
-            if not repo.bare and repo.remote().url == repo_url:
-                return temp_dir
-        except:
-            # If there's any error with existing repo, clean it up
-            shutil.rmtree(temp_dir, ignore_errors=True)
+    response = requests.get(url, params=params, headers=headers)
     
-    # Create directory and clone repository
-    os.makedirs(temp_dir, exist_ok=True)
-    try:
-        git.Repo.clone_from(repo_url, temp_dir)
-        return temp_dir
-    except Exception as e:
-        # Clean up on error
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise Exception(f"Failed to clone repository: {str(e)}")
-
-def get_directory_tree(path: str, prefix: str = "") -> str:
-    """Generate a tree-like directory structure string"""
-    output = ""
-    entries = os.listdir(path)
-    entries.sort()
+    if response.status_code != 200:
+        return {"error": f"GitHub API error: {response.status_code} - {response.text}"}
     
-    for i, entry in enumerate(entries):
-        if entry.startswith('.git'):
-            continue
-            
-        is_last = i == len(entries) - 1
-        current_prefix = "└── " if is_last else "├── "
-        next_prefix = "    " if is_last else "│   "
-        
-        entry_path = os.path.join(path, entry)
-        output += prefix + current_prefix + entry + "\n"
-        
-        if os.path.isdir(entry_path):
-            output += get_directory_tree(entry_path, prefix + next_prefix)
-            
-    return output
+    return response.json()
 
 @mcp.tool()
-def git_directory_structure(repo_url: str) -> str:
-    """
-    Clone a Git repository and return its directory structure in a tree format.
+def github_get_file(repo: str, file_path: str, branch: str = "main") -> str:
+    """Get the contents of a specific file from a GitHub repository.
     
     Args:
-        repo_url: The URL of the Git repository
-        
-    Returns:
-        A string representation of the repository's directory structure
+        repo: Repository in the format 'owner/repo'
+        file_path: Path to the file within the repository
+        branch: The branch or commit reference (default: main)
     """
-    try:
-        # Clone the repository
-        repo_path = clone_repo(repo_url)
+    # Parse the repo parameter
+    parts = repo.split('/')
+    if len(parts) != 2:
+        return f"Error: Repository format should be 'owner/repo', got '{repo}'"
+    
+    owner, repo_name = parts
+    
+    # Get file contents from GitHub API
+    contents = get_github_contents(owner, repo_name, file_path, branch)
+    
+    if "error" in contents:
+        return f"Error: {contents['error']}"
         
-        # Generate the directory tree
-        tree = get_directory_tree(repo_path)
-        return tree
+    if isinstance(contents, dict) and "type" in contents:
+        if contents["type"] != "file":
+            return f"Error: Path '{file_path}' is not a file"
             
+        if "content" in contents and contents["encoding"] == "base64":
+            decoded_content = base64.b64decode(contents["content"]).decode("utf-8")
+            return decoded_content
+        else:
+            return f"Error: Could not decode file content"
+    else:
+        return f"Error: Unexpected API response format"
+
+@mcp.tool()
+def github_list_directory(repo: str, path: str = "", branch: str = "main") -> str:
+    """List files and directories at the specified path in a GitHub repository.
+    
+    Args:
+        repo: Repository in the format 'owner/repo'
+        path: Path within the repository (default: repository root)
+        branch: The branch or commit reference (default: main)
+    """
+    # Parse the repo parameter
+    parts = repo.split('/')
+    if len(parts) != 2:
+        return f"Error: Repository format should be 'owner/repo', got '{repo}'"
+    
+    owner, repo_name = parts
+    
+    # Get directory contents from GitHub API
+    contents = get_github_contents(owner, repo_name, path, branch)
+    
+    if "error" in contents:
+        return f"Error: {contents['error']}"
+        
+    if not isinstance(contents, list):
+        return f"Error: Path '{path}' is not a directory or the API returned unexpected data"
+        
+    formatted_results = []
+    for item in contents:
+        item_type = item["type"]  # "file" or "dir"
+        item_name = item["name"]
+        item_path = item["path"]
+        item_size = item.get("size", "N/A") if item["type"] == "file" else "N/A"
+        
+        formatted_item = f"""
+Type: {item_type}
+Name: {item_name}
+Path: {item_path}
+Size: {item_size} bytes
+"""
+        formatted_results.append(formatted_item)
+        
+    return "\n---\n".join(formatted_results)
+
+@mcp.tool()
+def github_search_code(repo: str, query: str, branch: str = "main") -> str:
+    """Search for files matching a query within a GitHub repository.
+    
+    Args:
+        repo: Repository in the format 'owner/repo'
+        query: Search term to look for in filenames
+        branch: The branch or commit reference (default: main)
+    """
+    # Parse the repo parameter
+    parts = repo.split('/')
+    if len(parts) != 2:
+        return f"Error: Repository format should be 'owner/repo', got '{repo}'"
+    
+    owner, repo_name = parts
+    
+    url = f"{GITHUB_API_BASE}/search/code"
+    params = {
+        "q": f"{query} in:file repo:{owner}/{repo_name} ref:{branch}",
+    }
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"token {GITHUB_TOKEN}"
+    }
+    
+    response = requests.get(url, params=params, headers=headers)
+    
+    if response.status_code != 200:
+        return f"Error: GitHub API error: {response.status_code} - {response.text}"
+    
+    result = response.json()
+    items = result.get("items", [])
+    
+    if not items:
+        return "No matching files found."
+    
+    formatted_results = []
+    for i, item in enumerate(items, 1):
+        formatted_item = f"""
+Result {i}:
+Name: {item.get('name', 'Unknown')}
+Path: {item.get('path', 'Unknown')}
+URL: {item.get('html_url', 'Unknown')}
+"""
+        formatted_results.append(formatted_item)
+        
+    return "\n---\n".join(formatted_results)
+
+@mcp.tool()
+def check_github_connection() -> str:
+    """Verify the connection to GitHub API is working properly."""
+    try:
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Authorization": f"token {GITHUB_TOKEN}"
+        }
+        response = requests.get(f"{GITHUB_API_BASE}/rate_limit", headers=headers)
+        if response.status_code == 200:
+            rate_limit_info = response.json()
+            core_remaining = rate_limit_info.get("resources", {}).get("core", {}).get("remaining", 0)
+            return f"GitHub API connection successful. Remaining rate limit: {core_remaining} requests."
+        else:
+            return f"Error connecting to GitHub API: {response.status_code} - {response.text}"
     except Exception as e:
         return f"Error: {str(e)}"
 
-@mcp.tool()
-def git_read_important_files(repo_url: str, file_paths: List[str]) -> dict[str, str]:
-    """
-    Read the contents of specified files in a given git repository.
-    
-    Args:
-        repo_url: The URL of the Git repository
-        file_paths: List of file paths to read (relative to repository root)
-        
-    Returns:
-        A dictionary mapping file paths to their contents
-    """
-    try:
-        # Clone the repository
-        repo_path = clone_repo(repo_url)
-        results = {}
-        
-        for file_path in file_paths:
-            full_path = os.path.join(repo_path, file_path)
-            
-            # Check if file exists
-            if not os.path.isfile(full_path):
-                results[file_path] = f"Error: File not found"
-                continue
-                
-            try:
-                with open(full_path, 'r', encoding='utf-8') as f:
-                    results[file_path] = f.read()
-            except Exception as e:
-                results[file_path] = f"Error reading file: {str(e)}"
-        
-        return results
-            
-            
-    except Exception as e:
-        return {"error": f"Failed to process repository: {str(e)}"} 
+# This is the critical part that was missing in the previous implementation
+if __name__ == "__main__":
+    # Initialize and run the server
+    mcp.run(transport='stdio') 

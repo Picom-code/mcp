@@ -11,6 +11,12 @@
         "args": [
           "/Users/patrickmoorhead/Code/amd/web_search.py"
         ]
+      },
+      "github2": {
+        "command": "python3",
+        "args": [
+          "/Users/patrickmoorhead/Code/amd/github.py"
+        ]
       }
     }
   }
